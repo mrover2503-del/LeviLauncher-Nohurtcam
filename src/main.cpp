@@ -28,9 +28,7 @@
 static bool g_enabled = true;
 static bool g_hooked = false;
 
-static std::optional<std::array<float, 3>> (*g_tryGetDamageBob_orig)(
-    void**, void*, float
-) = nullptr;
+static std::optional<std::array<float, 3>> (*g_tryGetDamageBob_orig)(void**, void*, float) = nullptr;
 
 static std::optional<std::array<float, 3>>
 VanillaCameraAPI_tryGetDamageBob_hook(void** self, void* traits, float a) {
@@ -171,6 +169,7 @@ static void Render() {
 
 static EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surf) {
     if (!orig_eglSwapBuffers) return EGL_FALSE;
+
     EGLContext ctx = eglGetCurrentContext();
     if (ctx == EGL_NO_CONTEXT) return orig_eglSwapBuffers(dpy, surf);
 
@@ -198,12 +197,18 @@ static EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surf) {
 }
 
 static void HookInput() {
-    void* s1 = GlossSymbol(GlossOpen("libinput.so"),
-        "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE", nullptr);
+    void* s1 = (void*)GlossSymbol(
+        GlossOpen("libinput.so"),
+        "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE",
+        nullptr
+    );
     if (s1) GlossHook(s1, (void*)hook_Input1, (void**)&orig_Input1);
 
-    void* s2 = GlossSymbol(GlossOpen("libinput.so"),
-        "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE", nullptr);
+    void* s2 = (void*)GlossSymbol(
+        GlossOpen("libinput.so"),
+        "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE",
+        nullptr
+    );
     if (s2) GlossHook(s2, (void*)hook_Input2, (void**)&orig_Input2);
 }
 
@@ -211,7 +216,7 @@ static void* MainThread(void*) {
     sleep(3);
     GlossInit(true);
     GHandle egl = GlossOpen("libEGL.so");
-    void* swap = GlossSymbol(egl, "eglSwapBuffers", nullptr);
+    void* swap = (void*)GlossSymbol(egl, "eglSwapBuffers", nullptr);
     GlossHook(swap, (void*)hook_eglSwapBuffers, (void**)&orig_eglSwapBuffers);
     HookInput();
     return nullptr;
