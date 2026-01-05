@@ -1,18 +1,13 @@
 #include <jni.h>
 #include <android/input.h>
-#include <android/log.h>
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <dlfcn.h>
-#include <cstring>
-#include <cstdint>
-#include <sys/mman.h>
+#include <vector>
 #include <fstream>
-#include <string>
-#include <optional>
-#include <array>
+#include <sstream>
 
 #include "pl/Hook.h"
 #include "pl/Gloss.h"
@@ -21,203 +16,286 @@
 #include "ImGui/backends/imgui_impl_opengl3.h"
 #include "ImGui/backends/imgui_impl_android.h"
 
-#define LOG_TAG "NoHurtCam"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#include <android/log.h>
+#include <android/asset_manager.h>
 
-static bool g_enabled = true;
-static bool g_hooked = false;
+#include <cstring>
+#include <string>
 
-static std::optional<std::array<float, 3>> (*g_tryGetDamageBob_orig)(void**, void*, float) = nullptr;
+#define TAG "INEB"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, VA_ARGS)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, VA_ARGS)
 
-static std::optional<std::array<float, 3>>
-VanillaCameraAPI_tryGetDamageBob_hook(void** self, void* traits, float a) {
-    if (g_enabled) return std::nullopt;
-    return g_tryGetDamageBob_orig(self, traits, a);
+static bool isEnabled = false;
+
+static uintptr_t g_LibBase = 0;
+static uintptr_t g_XPAddress = 0; 
+static bool g_XPSearchDone = false;
+
+static bool g_Initialized = false;
+static int g_Width = 0, g_Height = 0;
+static EGLContext g_TargetContext = EGL_NO_CONTEXT;
+static EGLSurface g_TargetSurface = EGL_NO_SURFACE;
+
+uintptr_t GetLibBase(const char* libName) {
+    FILE* fp;
+    char line[256];
+    uintptr_t addr = 0;
+    
+    fp = fopen("/proc/self/maps", "r");
+    if (!fp) return 0;
+    
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, libName)) {
+            char* end;
+            addr = strtoul(line, &end, 16);
+            break;
+        }
+    }
+    fclose(fp);
+    return addr;
 }
 
-static bool parseMapsLine(const std::string& line, uintptr_t& start, uintptr_t& end) {
-    return sscanf(line.c_str(), "%lx-%lx", &start, &end) == 2;
+uintptr_t FindPattern(uintptr_t start, size_t length, const char* pattern) {
+    const char* pat = pattern;
+    uintptr_t firstMatch = 0;
+    uintptr_t rangeEnd = start + length;
+
+    for (uintptr_t pCur = start; pCur < rangeEnd; pCur++) {
+        if (!*pat) return firstMatch;
+
+        if (*(uint8_t*)pat == '\?' || *(uint8_t*)pCur == (uint8_t)strtoul(pat, NULL, 16)) {
+            if (!firstMatch) firstMatch = pCur;
+            
+            if (!pat[2]) return firstMatch;
+
+            if (*(uint16_t*)pat == '\?\?' || *(uint8_t*)pat != '\?') 
+                pat += 3;
+            else 
+                pat += 2;
+        } else {
+            pat = pattern;
+            firstMatch = 0;
+        }
+    }
+    return 0;
 }
-
-static bool hookVanillaCameraAPI() {
-    if (g_hooked) return true;
-
-    void* mc = dlopen("libminecraftpe.so", RTLD_NOLOAD);
-    if (!mc) mc = dlopen("libminecraftpe.so", RTLD_LAZY);
-    if (!mc) return false;
-
-    const char* RTTI = "16VanillaCameraAPI";
-    size_t RTTI_LEN = strlen(RTTI);
-
-    uintptr_t rtti = 0, typeinfo = 0, vtable = 0;
-    std::ifstream maps;
-    std::string line;
-
-    maps.open("/proc/self/maps");
-    while (std::getline(maps, line)) {
-        if (line.find("libminecraftpe.so") == std::string::npos) continue;
-        if (line.find("r--p") == std::string::npos && line.find("r-xp") == std::string::npos) continue;
-        uintptr_t s, e;
-        if (!parseMapsLine(line, s, e)) continue;
-        for (uintptr_t p = s; p < e - RTTI_LEN; ++p) {
-            if (!memcmp((void*)p, RTTI, RTTI_LEN)) { rtti = p; break; }
-        }
-        if (rtti) break;
-    }
-    maps.close();
-    if (!rtti) return false;
-
-    maps.open("/proc/self/maps");
-    while (std::getline(maps, line)) {
-        if (line.find("libminecraftpe.so") == std::string::npos) continue;
-        if (line.find("r--p") == std::string::npos) continue;
-        uintptr_t s, e;
-        if (!parseMapsLine(line, s, e)) continue;
-        for (uintptr_t p = s; p < e; p += sizeof(void*)) {
-            if (*(uintptr_t*)p == rtti) { typeinfo = p - sizeof(void*); break; }
-        }
-        if (typeinfo) break;
-    }
-    maps.close();
-    if (!typeinfo) return false;
-
-    maps.open("/proc/self/maps");
-    while (std::getline(maps, line)) {
-        if (line.find("libminecraftpe.so") == std::string::npos) continue;
-        if (line.find("r--p") == std::string::npos) continue;
-        uintptr_t s, e;
-        if (!parseMapsLine(line, s, e)) continue;
-        for (uintptr_t p = s; p < e; p += sizeof(void*)) {
-            if (*(uintptr_t*)p == typeinfo) { vtable = p + sizeof(void*); break; }
-        }
-        if (vtable) break;
-    }
-    maps.close();
-    if (!vtable) return false;
-
-    void** slot = (void**)(vtable + 2 * sizeof(void*));
-    g_tryGetDamageBob_orig = (decltype(g_tryGetDamageBob_orig))(*slot);
-
-    uintptr_t page = (uintptr_t)slot & ~4095UL;
-    mprotect((void*)page, 4096, PROT_READ | PROT_WRITE);
-    *slot = (void*)VanillaCameraAPI_tryGetDamageBob_hook;
-    mprotect((void*)page, 4096, PROT_READ);
-
-    g_hooked = true;
-    return true;
-}
-
-static bool g_imguiInit = false;
-static EGLContext g_ctx = EGL_NO_CONTEXT;
-static EGLSurface g_surf = EGL_NO_SURFACE;
-static int g_w = 0, g_h = 0;
 
 static EGLBoolean (*orig_eglSwapBuffers)(EGLDisplay, EGLSurface) = nullptr;
-static void (*orig_Input1)(void*, void*, void*) = nullptr;
-static int32_t (*orig_Input2)(void*, void*, bool, long, uint32_t*, AInputEvent**) = nullptr;
+static void (orig_Input1)(void, void*, void*) = nullptr;
 
-static void hook_Input1(void* t, void* a1, void* a2) {
-    if (g_imguiInit && a2) ImGui_ImplAndroid_HandleInputEvent((AInputEvent*)a2);
-    if (orig_Input1) orig_Input1(t, a1, a2);
+static void hook_Input1(void* thiz, void* a1, void* a2) {
+    if (g_Initialized) ImGui_ImplAndroid_HandleInputEvent((AInputEvent*)a2);
+    if (orig_Input1) orig_Input1(thiz, a1, a2);
 }
 
-static int32_t hook_Input2(void* t, void* a1, bool a2, long a3, uint32_t* a4, AInputEvent** ev) {
-    int32_t r = orig_Input2 ? orig_Input2(t, a1, a2, a3, a4, ev) : 0;
-    if (g_imguiInit && ev && *ev) ImGui_ImplAndroid_HandleInputEvent(*ev);
-    return r;
+static int32_t (orig_Input2)(void, void*, bool, long, uint32_t*, AInputEvent**) = nullptr;
+
+static int32_t hook_Input2(void* thiz, void* a1, bool a2, long a3, uint32_t* a4, AInputEvent** event) {
+    int32_t result = orig_Input2 ? orig_Input2(thiz, a1, a2, a3, a4, event) : 0;
+    if (event && *event && g_Initialized) {
+        ImGui_ImplAndroid_HandleInputEvent(*event);
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.WantCaptureMouse || io.WantCaptureKeyboard) return result;
+    }
+    return result;
 }
 
-static void SetupImGui() {
-    if (g_imguiInit) return;
-    ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.IniFilename = nullptr;
-    io.FontGlobalScale = 2.2f;
-    ImGui::StyleColorsDark();
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.ScaleAllSizes(2.0f);
-    ImGui_ImplAndroid_Init();
-    ImGui_ImplOpenGL3_Init("#version 300 es");
-    g_imguiInit = true;
+static AAsset* (orig_AAssetManager_open)(AAssetManager, const char*, int) = nullptr;
+
+static AAsset* my_AAssetManager_open(AAssetManager* mgr, const char* name, int mode) {
+    if(!isEnabled) return orig_AAssetManager_open(mgr, name, mode);
+    if(!(name && strncmp(name, "assets/renderer/materials/", 26) == 0)) return orig_AAssetManager_open(mgr, name, mode);
+    std::string base = name;
+    size_t pos = base.find_last_of('/');
+    if (pos != std::string::npos) base = base.substr(pos + 1);
+    if(!(base == "RenderChunk.material.bin")) return orig_AAssetManager_open(mgr, name, mode);
+    std::string path = "../../../storage/emulated/0/games/org.levimc/shaders/" + base;
+    return orig_AAssetManager_open(mgr, path.c_str(), mode);
+}
+
+struct GLState {
+    GLint prog, tex, aTex, aBuf, eBuf, vao, fbo, vp[4], sc[4], bSrc, bDst;
+    GLboolean blend, cull, depth, scissor;
+};
+
+static void SaveGL(GLState& s) {
+    glGetIntegerv(GL_CURRENT_PROGRAM, &s.prog);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &s.tex);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &s.aTex);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &s.aBuf);
+    glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &s.eBuf);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &s.vao);
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &s.fbo);
+    glGetIntegerv(GL_VIEWPORT, s.vp);
+    glGetIntegerv(GL_SCISSOR_BOX, s.sc);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &s.bSrc);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &s.bDst);
+    s.blend = glIsEnabled(GL_BLEND);
+    s.cull = glIsEnabled(GL_CULL_FACE);
+    s.depth = glIsEnabled(GL_DEPTH_TEST);
+    s.scissor = glIsEnabled(GL_SCISSOR_TEST);
+}
+
+static void RestoreGL(const GLState& s) {
+    glUseProgram(s.prog);
+    glActiveTexture(s.aTex);
+    glBindTexture(GL_TEXTURE_2D, s.tex);
+    glBindBuffer(GL_ARRAY_BUFFER, s.aBuf);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s.eBuf);
+    glBindVertexArray(s.vao);
+    glBindFramebuffer(GL_FRAMEBUFFER, s.fbo);
+    glViewport(s.vp[0], s.vp[1], s.vp[2], s.vp[3]);
+    glScissor(s.sc[0], s.sc[1], s.sc[2], s.sc[3]);
+    glBlendFunc(s.bSrc, s.bDst);
+    s.blend ? glEnable(GL_BLEND) : glDisable(GL_BLEND);
+    s.cull ? glEnable(GL_CULL_FACE) : glDisable(GL_CULL_FACE);
+    s.depth ? glEnable(GL_DEPTH_TEST) : glDisable(GL_DEPTH_TEST);
+    s.scissor ? glEnable(GL_SCISSOR_TEST) : glDisable(GL_SCISSOR_TEST);
 }
 
 static void DrawMenu() {
-    ImGui::SetNextWindowSize(ImVec2(700, 450), ImGuiCond_Always);
-    ImGui::Begin("NoHurtCam Menu", nullptr,
-        ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoSavedSettings |
-        ImGuiWindowFlags_NoResize);
-    ImGui::Checkbox("No Hurt Camera", &g_enabled);
+    ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
+    ImGui::Begin("NexCaise Mod Menu", nullptr, 0);
+    
+    ImGui::Text("Visuals");
+    ImGui::Checkbox("Entity ESP", &isEnabled);
+    
+    ImGui::Separator();
+    
+    ImGui::Text("Player Stats");
+    
+    if (ImGui::Button("Add 100 XP")) {
+        if (g_LibBase == 0) {
+            g_LibBase = GetLibBase("libminecraftpe.so");
+        }
+
+        if (g_LibBase != 0 && !g_XPSearchDone) {
+            const char* xpPattern = "7C 3D ? ? ? C"; 
+            uintptr_t foundAddr = FindPattern(g_LibBase, 0x4000000, xpPattern);
+            
+            if (foundAddr != 0) {
+                g_XPAddress = foundAddr;
+                LOGI("XP Address found at: %lX", g_XPAddress);
+            } else {
+                LOGE("XP Address NOT found with pattern.");
+            }
+            g_XPSearchDone = true;
+        }
+
+        if (g_XPAddress != 0) {
+            try {
+                float* xpPtr = reinterpret_cast<float*>(g_XPAddress);
+                float oldVal = *xpPtr;
+                *xpPtr += 100.0f;
+                LOGI("Added XP. Old: %f -> New: %f", oldVal, *xpPtr);
+            } catch (...) {
+                LOGE("Failed to write memory (Crash prevented)");
+            }
+        } else {
+            LOGE("Cannot add XP: Address is null.");
+        }
+    }
+
+    if (g_XPAddress != 0) {
+        ImGui::Text("XP Addr: 0x%lX", g_XPAddress);
+    }
+
     ImGui::End();
 }
 
-static void RenderImGui() {
+static void Setup() {
+    if (g_Initialized || g_Width <= 0 || g_Height <= 0) return;
+    ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = ImVec2((float)g_w, (float)g_h);
+    io.IniFilename = nullptr;
+    float scale = (float)g_Height / 900.0f;
+    if (scale < 1.1f) scale = 1.1f;
+    if (scale > 2.5f) scale = 2.5f;
+    ImFontConfig cfg;
+    cfg.SizePixels = 19.0f * scale;
+    io.Fonts->AddFontDefault(&cfg);
+    ImGui_ImplAndroid_Init();
+    ImGui_ImplOpenGL3_Init("#version 300 es");
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.ScaleAllSizes(scale);
+    style.FramePadding = ImVec2(10.0f * scale, 9.0f * scale);
+    style.ItemSpacing = ImVec2(9.0f * scale, 9.0f * scale);
+    style.GrabMinSize = 19.0f * scale;
+    style.ScrollbarSize = 19.0f * scale;
+    g_Initialized = true;
+}
+
+static void Render() {
+    if (!g_Initialized) return;
+    GLState s;
+    SaveGL(s);
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)g_Width, (float)g_Height);
     ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplAndroid_NewFrame(g_w, g_h);
+    ImGui_ImplAndroid_NewFrame(g_Width, g_Height);
     ImGui::NewFrame();
     DrawMenu();
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    RestoreGL(s);
 }
 
 static EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surf) {
     if (!orig_eglSwapBuffers) return EGL_FALSE;
-
     EGLContext ctx = eglGetCurrentContext();
     if (ctx == EGL_NO_CONTEXT) return orig_eglSwapBuffers(dpy, surf);
-
-    EGLint w, h;
+    EGLint w = 0, h = 0;
     eglQuerySurface(dpy, surf, EGL_WIDTH, &w);
     eglQuerySurface(dpy, surf, EGL_HEIGHT, &h);
-
-    g_w = w;
-    g_h = h;
-
-    if (g_ctx == EGL_NO_CONTEXT) {
-        g_ctx = ctx;
-        g_surf = surf;
+    if (w < 500 || h < 500) return orig_eglSwapBuffers(dpy, surf);
+    if (g_TargetContext == EGL_NO_CONTEXT) {
+        EGLint buf = 0;
+        eglQuerySurface(dpy, surf, EGL_RENDER_BUFFER, &buf);
+        if (buf == EGL_BACK_BUFFER) {
+            g_TargetContext = ctx;
+            g_TargetSurface = surf;
+        }
     }
-
-    if (ctx == g_ctx && surf == g_surf) {
-        hookVanillaCameraAPI();
-        SetupImGui();
-        RenderImGui();
-    }
-
+    if (ctx != g_TargetContext || surf != g_TargetSurface) return orig_eglSwapBuffers(dpy, surf);
+    g_Width = w;
+    g_Height = h;
+    Setup();
+    Render();
     return orig_eglSwapBuffers(dpy, surf);
 }
 
 static void HookInput() {
-    void* s1 = (void*)GlossSymbol(
-        GlossOpen("libinput.so"),
-        "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE",
-        nullptr
-    );
-    if (s1) GlossHook(s1, (void*)hook_Input1, (void**)&orig_Input1);
+    void* sym1 = (void*)GlossSymbol(GlossOpen("libinput.so"), "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE", nullptr);
+    if (sym1) GlossHook(sym1, (void*)hook_Input1, (void**)&orig_Input1);
+    void* sym2 = (void*)GlossSymbol(GlossOpen("libinput.so"), "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE", nullptr);
+    if (sym2) GlossHook(sym2, (void*)hook_Input2, (void**)&orig_Input2);
+}
 
-    void* s2 = (void*)GlossSymbol(
-        GlossOpen("libinput.so"),
-        "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE",
-        nullptr
-    );
-    if (s2) GlossHook(s2, (void*)hook_Input2, (void**)&orig_Input2);
+static void HookAAMO() {
+    void* lib = dlopen("libminecraftpe.so", RTLD_NOW);
+    if (!lib) return;
+    void* sym = dlsym(lib, "AAssetManager_open");
+    if (!sym) return;
+    pl::hook::pl_hook((pl::hook::FuncPtr)sym, (pl::hook::FuncPtr)my_AAssetManager_open, (pl::hook::FuncPtr*)&orig_AAssetManager_open, pl::hook::PriorityHighest);
 }
 
 static void* MainThread(void*) {
     sleep(3);
     GlossInit(true);
-    GHandle egl = GlossOpen("libEGL.so");
-    void* swap = (void*)GlossSymbol(egl, "eglSwapBuffers", nullptr);
+    GHandle hEGL = GlossOpen("libEGL.so");
+    if (!hEGL) return nullptr;
+    void* swap = (void*)GlossSymbol(hEGL, "eglSwapBuffers", nullptr);
+    if (!swap) return nullptr;
     GlossHook(swap, (void*)hook_eglSwapBuffers, (void**)&orig_eglSwapBuffers);
     HookInput();
+    HookAAMO();
+    g_LibBase = GetLibBase("libminecraftpe.so");
     return nullptr;
 }
 
 __attribute__((constructor))
-void Init() {
+void DisplayFPS_Init() {
     pthread_t t;
     pthread_create(&t, nullptr, MainThread, nullptr);
 }
