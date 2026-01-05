@@ -156,12 +156,8 @@ static void RestoreGL(const GLState& s) {
 
 static void DrawMenu() {
     ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
-    ImGui::Begin("NexCaise Mod Menu", nullptr, 0);
+    ImGui::Begin("Xp Mod Menu", nullptr, 0);
     
-    ImGui::Text("Visuals");
-    ImGui::Checkbox("Entity ESP", &isEnabled);
-    
-    ImGui::Separator();
     
     ImGui::Text("Player Stats");
     
