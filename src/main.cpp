@@ -175,8 +175,9 @@ static EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surf) {
 
 static void HookInput() {
     void* lib = GlossOpen("libinput.so");
-    void* s1 = GlossSymbol(lib, "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE", nullptr);
-    void* s2 = GlossSymbol(lib, "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE", nullptr);
+    // uintptr_t를 void*로 캐스팅하여 오류 해결
+    void* s1 = reinterpret_cast<void*>(GlossSymbol(lib, "_ZN7android13InputConsumer21initializeMotionEventEPNS_11MotionEventEPKNS_12InputMessageE", nullptr));
+    void* s2 = reinterpret_cast<void*>(GlossSymbol(lib, "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE", nullptr));
     if (s1) GlossHook(s1, (void*)hook_Input1, (void**)&orig_Input1);
     if (s2) GlossHook(s2, (void*)hook_Input2, (void**)&orig_Input2);
 }
@@ -185,7 +186,8 @@ static void* MainThread(void*) {
     sleep(3);
     GlossInit(true);
     void* egl = GlossOpen("libEGL.so");
-    void* swap = GlossSymbol(egl, "eglSwapBuffers", nullptr);
+    // uintptr_t를 void*로 캐스팅하여 오류 해결
+    void* swap = reinterpret_cast<void*>(GlossSymbol(egl, "eglSwapBuffers", nullptr));
     GlossHook(swap, (void*)hook_eglSwapBuffers, (void**)&orig_eglSwapBuffers);
     HookInput();
     return nullptr;
