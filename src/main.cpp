@@ -23,10 +23,8 @@ static int w=0,h=0;
 static bool inited=false;
 
 static bool show_intro=true;
-static float intro_t=0.0f;
 
 static int tab=0;
-
 static float hue=0.0f;
 
 static bool cfg[10]={0};
@@ -43,7 +41,7 @@ static float touch_x=0.0f,touch_y=0.0f;
 
 static ImVec4 rgb()
 {
-    hue+=0.3f;
+    hue+=0.25f;
     if(hue>=360.0f) hue=0.0f;
     float h6=hue/60.0f;
     float c=1.0f;
@@ -69,39 +67,25 @@ static void theme()
     c[ImGuiCol_ButtonHovered]=a;
     c[ImGuiCol_ButtonActive]=a;
     c[ImGuiCol_CheckMark]=a;
-    c[ImGuiCol_SliderGrab]=a;
-    c[ImGuiCol_SliderGrabActive]=a;
-    s.WindowBorderSize=2;
-    s.WindowRounding=14;
-    s.FrameRounding=10;
+    s.WindowBorderSize=3;
+    s.WindowRounding=16;
+    s.FrameRounding=12;
 }
 
-static void keyboard()
+static void draw_box(const char* title,const char* text,float x,float y)
 {
-    if(!kb_open) return;
-    ImGui::SetNextWindowSize(ImVec2(720,420));
-    ImGui::Begin("Keyboard",0,ImGuiWindowFlags_NoCollapse);
-    const char* k="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    for(int i=0;i<36;i++)
-    {
-        char b[2]={k[i],0};
-        if(ImGui::Button(b,ImVec2(60,60)))
-        {
-            int l=strlen(pw);
-            if(l<31){ pw[l]=k[i]; pw[l+1]=0; }
-        }
-        if((i+1)%7!=0) ImGui::SameLine();
-    }
-    if(ImGui::Button("DEL",ImVec2(200,60)))
-    {
-        int l=strlen(pw);
-        if(l>0) pw[l-1]=0;
-    }
-    ImGui::SameLine();
-    if(ImGui::Button("CLEAR",ImVec2(200,60))) pw[0]=0;
-    ImGui::SameLine();
-    if(ImGui::Button("CLOSE",ImVec2(200,60))) kb_open=false;
+    ImVec4 a=rgb();
+    ImGui::SetNextWindowPos(ImVec2(x,y));
+    ImGui::SetNextWindowBgAlpha(0.5f);
+    ImGui::PushStyleColor(ImGuiCol_Border,a);
+    ImGui::Begin(title,0,
+        ImGuiWindowFlags_NoTitleBar|
+        ImGuiWindowFlags_NoResize|
+        ImGuiWindowFlags_NoInputs);
+    ImGui::SetWindowFontScale(1.3f);
+    ImGui::Text("%s",text);
     ImGui::End();
+    ImGui::PopStyleColor();
 }
 
 static int fake_ping(){ return 45; }
@@ -110,37 +94,27 @@ static int fake_battery(){ return 87; }
 static void overlay()
 {
     time_t now=time(0);
-    struct tm timeinfo;
-    localtime_r(&now,&timeinfo);
+    struct tm ti;
+    localtime_r(&now,&ti);
 
-    ImGui::SetNextWindowPos(ImVec2(w-360,20));
-    ImGui::SetNextWindowBgAlpha(0.5f);
-    ImGui::Begin("Overlay",0,
-        ImGuiWindowFlags_NoResize|
-        ImGuiWindowFlags_NoTitleBar|
-        ImGuiWindowFlags_NoInputs);
+    float y=20;
 
-    if(cfg[0]) ImGui::Text("Ping: %d ms",fake_ping());
-    if(cfg[1]) ImGui::Text("FPS: %d",fps);
-    if(cfg[2]) ImGui::Text("Time: %02d:%02d:%02d",
-        timeinfo.tm_hour,timeinfo.tm_min,timeinfo.tm_sec);
-    if(cfg[3]) ImGui::Text("Battery: %d%%",fake_battery());
-    if(cfg[4]) ImGui::Text("Resolution: %dx%d",w,h);
-    if(cfg[5]) ImGui::Text("Touch X: %.1f",touch_x);
-    if(cfg[6]) ImGui::Text("Touch Y: %.1f",touch_y);
-    if(cfg[7]) ImGui::Text("Aspect: %.2f",(float)w/(float)h);
-    if(cfg[8]) ImGui::Text("DPI Scale: %.2f",ImGui::GetIO().FontGlobalScale);
-    if(cfg[9]) ImGui::Text("RGB Hue: %.1f",hue);
-
-    ImGui::End();
+    if(cfg[0]){ draw_box("p","Ping: 45 ms",20,y); y+=90; }
+    if(cfg[1]){ char b[32]; sprintf(b,"FPS: %d",fps); draw_box("f",b,20,y); y+=90; }
+    if(cfg[2]){ char b[32]; sprintf(b,"Time: %02d:%02d:%02d",ti.tm_hour,ti.tm_min,ti.tm_sec); draw_box("t",b,20,y); y+=90; }
+    if(cfg[3]){ draw_box("b","Battery: 87%",20,y); y+=90; }
+    if(cfg[4]){ char b[32]; sprintf(b,"Res: %dx%d",w,h); draw_box("r",b,20,y); y+=90; }
+    if(cfg[5]){ char b[32]; sprintf(b,"Touch X: %.0f",touch_x); draw_box("x",b,20,y); y+=90; }
+    if(cfg[6]){ char b[32]; sprintf(b,"Touch Y: %.0f",touch_y); draw_box("y",b,20,y); y+=90; }
+    if(cfg[7]){ char b[32]; sprintf(b,"Aspect: %.2f",(float)w/h); draw_box("a",b,20,y); y+=90; }
+    if(cfg[8]){ char b[32]; sprintf(b,"Scale: %.2f",ImGui::GetIO().FontGlobalScale); draw_box("s",b,20,y); y+=90; }
+    if(cfg[9]){ char b[32]; sprintf(b,"Hue: %.1f",hue); draw_box("h",b,20,y); }
 
     if(unlocked)
     {
-        ImGui::SetNextWindowPos(ImVec2(20,h-320));
-        ImGui::Begin("Hidden",0,ImGuiWindowFlags_NoResize);
         for(int i=0;i<10;i++)
-            if(hidden[i]) ImGui::Text("Hidden Overlay %d Active",i+1);
-        ImGui::End();
+            if(hidden[i])
+                draw_box("hid","Hidden Overlay Active",w-360,60+i*70);
     }
 }
 
@@ -152,29 +126,30 @@ static void intro()
     ImGui::SetWindowFontScale(1.6f);
     ImGui::Text("Shortcut Plugin");
     ImGui::Separator();
-    ImGui::TextColored(rgb(),"████████████████████████████");
     ImGui::Text("Version: V1.0");
     ImGui::Text("Development: MCPE OVER");
     ImGui::Text("Launcher: Light, Levi Launcher");
+
+    ImGui::SetCursorPosY(ImGui::GetWindowSize().y-90);
+    ImGui::SetCursorPosX((ImGui::GetWindowSize().x-200)/2);
+    if(ImGui::Button("I read it",ImVec2(200,60)))
+        show_intro=false;
+
     ImGui::End();
-    intro_t+=ImGui::GetIO().DeltaTime;
-    if(intro_t>3.5f) show_intro=false;
 }
 
 static void config_tab()
 {
-    ImGui::SetWindowFontScale(1.3f);
-    const char* names[10]={
+    const char* n[10]={
         "Ping","FPS","Clock","Battery",
         "Resolution","Touch X","Touch Y",
-        "Aspect Ratio","DPI Scale","RGB Info"
+        "Aspect Ratio","DPI Scale","RGB Hue"
     };
-    for(int i=0;i<10;i++) ImGui::Checkbox(names[i],&cfg[i]);
+    for(int i=0;i<10;i++) ImGui::Checkbox(n[i],&cfg[i]);
 }
 
 static void sorry_tab()
 {
-    ImGui::SetWindowFontScale(1.3f);
     if(!unlocked)
     {
         ImGui::InputText("##pw",pw,sizeof(pw));
@@ -184,20 +159,15 @@ static void sorry_tab()
             if(strcmp(pw,"MCMROVER")==0) unlocked=true;
     }
     else
-    {
         for(int i=0;i<10;i++)
-        {
-            std::string n="Hidden Overlay "+std::to_string(i+1);
-            ImGui::Checkbox(n.c_str(),&hidden[i]);
-        }
-    }
+            ImGui::Checkbox(("Hidden "+std::to_string(i+1)).c_str(),&hidden[i]);
 }
 
 static void ui()
 {
     ImGui::SetNextWindowSize(ImVec2(900,700),ImGuiCond_FirstUseEver);
     ImGui::Begin("Main");
-    ImGui::BeginChild("left",ImVec2(160,0),true);
+    ImGui::BeginChild("left",ImVec2(180,0),true);
     if(ImGui::Button("Config",ImVec2(-1,80))) tab=0;
     if(ImGui::Button("Sorry",ImVec2(-1,80))) tab=1;
     ImGui::EndChild();
@@ -207,7 +177,6 @@ static void ui()
     if(tab==1) sorry_tab();
     ImGui::EndChild();
     ImGui::End();
-    keyboard();
     overlay();
 }
 
@@ -228,7 +197,7 @@ static void setup()
     if(inited) return;
     ImGui::CreateContext();
     ImGuiIO&io=ImGui::GetIO();
-    io.FontGlobalScale=1.6f;
+    io.FontGlobalScale=1.5f;
     ImGui_ImplAndroid_Init();
     ImGui_ImplOpenGL3_Init("#version 300 es");
     last_fps=ImGui::GetTime();
