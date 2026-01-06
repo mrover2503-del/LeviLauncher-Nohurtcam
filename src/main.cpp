@@ -23,29 +23,31 @@ static int w=0,h=0;
 static bool inited=false;
 
 static bool show_intro=true;
-static float intro_t=0;
+static float intro_t=0.0f;
 
 static int tab=0;
 
-static float hue=0;
+static float hue=0.0f;
 
-static bool cfg[10];
-static bool hidden[10];
+static bool cfg[10]={0};
+static bool hidden[10]={0};
 
 static bool kb_open=false;
 static char pw[32]={0};
 static bool unlocked=false;
 
 static int fps=0,frames=0;
-static double last_fps=0;
+static double last_fps=0.0;
 
-static float touch_x=0,touch_y=0;
+static float touch_x=0.0f,touch_y=0.0f;
 
 static ImVec4 rgb()
 {
-    hue+=0.15f;
-    if(hue>360) hue=0;
-    float h6=hue/60,c=1,x=c*(1-fabs(fmod(h6,2)-1));
+    hue+=0.3f;
+    if(hue>=360.0f) hue=0.0f;
+    float h6=hue/60.0f;
+    float c=1.0f;
+    float x=c*(1.0f-fabsf(fmodf(h6,2.0f)-1.0f));
     float r=0,g=0,b=0;
     if(h6<1){r=c;g=x;}
     else if(h6<2){r=x;g=c;}
@@ -53,7 +55,7 @@ static ImVec4 rgb()
     else if(h6<4){g=x;b=c;}
     else if(h6<5){r=x;b=c;}
     else{r=c;b=x;}
-    return ImVec4(r,g,b,1);
+    return ImVec4(r,g,b,1.0f);
 }
 
 static void theme()
@@ -107,12 +109,21 @@ static int fake_battery(){ return 87; }
 
 static void overlay()
 {
+    time_t now=time(0);
+    struct tm timeinfo;
+    localtime_r(&now,&timeinfo);
+
     ImGui::SetNextWindowPos(ImVec2(w-360,20));
     ImGui::SetNextWindowBgAlpha(0.5f);
-    ImGui::Begin("Overlay",0,ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoTitleBar);
+    ImGui::Begin("Overlay",0,
+        ImGuiWindowFlags_NoResize|
+        ImGuiWindowFlags_NoTitleBar|
+        ImGuiWindowFlags_NoInputs);
+
     if(cfg[0]) ImGui::Text("Ping: %d ms",fake_ping());
     if(cfg[1]) ImGui::Text("FPS: %d",fps);
-    if(cfg[2]) ImGui::Text("Time: %02d:%02d:%02d",tm.tm_hour,tm.tm_min,tm.tm_sec);
+    if(cfg[2]) ImGui::Text("Time: %02d:%02d:%02d",
+        timeinfo.tm_hour,timeinfo.tm_min,timeinfo.tm_sec);
     if(cfg[3]) ImGui::Text("Battery: %d%%",fake_battery());
     if(cfg[4]) ImGui::Text("Resolution: %dx%d",w,h);
     if(cfg[5]) ImGui::Text("Touch X: %.1f",touch_x);
@@ -120,6 +131,7 @@ static void overlay()
     if(cfg[7]) ImGui::Text("Aspect: %.2f",(float)w/(float)h);
     if(cfg[8]) ImGui::Text("DPI Scale: %.2f",ImGui::GetIO().FontGlobalScale);
     if(cfg[9]) ImGui::Text("RGB Hue: %.1f",hue);
+
     ImGui::End();
 
     if(unlocked)
@@ -127,9 +139,7 @@ static void overlay()
         ImGui::SetNextWindowPos(ImVec2(20,h-320));
         ImGui::Begin("Hidden",0,ImGuiWindowFlags_NoResize);
         for(int i=0;i<10;i++)
-        {
             if(hidden[i]) ImGui::Text("Hidden Overlay %d Active",i+1);
-        }
         ImGui::End();
     }
 }
@@ -154,8 +164,6 @@ static void intro()
 static void config_tab()
 {
     ImGui::SetWindowFontScale(1.3f);
-    ImGui::Text("Overlay Features");
-    ImGui::Separator();
     const char* names[10]={
         "Ping","FPS","Clock","Battery",
         "Resolution","Touch X","Touch Y",
@@ -169,17 +177,14 @@ static void sorry_tab()
     ImGui::SetWindowFontScale(1.3f);
     if(!unlocked)
     {
-        ImGui::Text("Protected Area");
         ImGui::InputText("##pw",pw,sizeof(pw));
         ImGui::SameLine();
-        if(ImGui::Button("Keyboard",ImVec2(160,50))) kb_open=true;
-        if(ImGui::Button("Unlock",ImVec2(260,60)))
+        if(ImGui::Button("Keyboard")) kb_open=true;
+        if(ImGui::Button("Unlock"))
             if(strcmp(pw,"MCMROVER")==0) unlocked=true;
     }
     else
     {
-        ImGui::Text("Hidden Overlays");
-        ImGui::Separator();
         for(int i=0;i<10;i++)
         {
             std::string n="Hidden Overlay "+std::to_string(i+1);
@@ -209,13 +214,10 @@ static void ui()
 static int32_t hook_input_func(void*a,void*b,bool c,long d,uint32_t*e,AInputEvent**ev)
 {
     int32_t r=orig_input?orig_input(a,b,c,d,e,ev):0;
-    if(ev&&*ev)
+    if(ev&&*ev&&AInputEvent_getType(*ev)==AINPUT_EVENT_TYPE_MOTION)
     {
-        if(AInputEvent_getType(*ev)==AINPUT_EVENT_TYPE_MOTION)
-        {
-            touch_x=AMotionEvent_getX(*ev,0);
-            touch_y=AMotionEvent_getY(*ev,0);
-        }
+        touch_x=AMotionEvent_getX(*ev,0);
+        touch_y=AMotionEvent_getY(*ev,0);
         if(inited) ImGui_ImplAndroid_HandleInputEvent(*ev);
     }
     return r;
@@ -266,7 +268,9 @@ static void* thread(void*)
     GHandle egl=GlossOpen("libEGL.so");
     GlossHook((void*)GlossSymbol(egl,"eglSwapBuffers",0),(void*)hook_swap_func,(void**)&orig_swap);
     GHandle inp=GlossOpen("libinput.so");
-    GlossHook((void*)GlossSymbol(inp,"_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE",0),(void*)hook_input_func,(void**)&orig_input);
+    GlossHook((void*)GlossSymbol(inp,
+        "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE",0),
+        (void*)hook_input_func,(void**)&orig_input);
     return 0;
 }
 
