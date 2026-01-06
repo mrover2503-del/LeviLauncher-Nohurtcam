@@ -122,7 +122,7 @@ static void intro()
 {
     ImGui::SetNextWindowSize(ImVec2(720,420));
     ImGui::SetNextWindowPos(ImVec2(w/2,h/2),0,ImVec2(0.5f,0.5f));
-    ImGui::Begin("Intro",0,ImGuiWindowFlags_NoResize);
+    ImGui::Begin("Hud Plugin",0,ImGuiWindowFlags_NoResize);
     ImGui::SetWindowFontScale(1.6f);
     ImGui::Text("Shortcut Plugin");
     ImGui::Separator();
@@ -169,7 +169,7 @@ static void ui()
     ImGui::Begin("Main");
     ImGui::BeginChild("left",ImVec2(180,0),true);
     if(ImGui::Button("Config",ImVec2(-1,80))) tab=0;
-    if(ImGui::Button("Sorry",ImVec2(-1,80))) tab=1;
+    if(ImGui::Button("Secret",ImVec2(-1,80))) tab=1;
     ImGui::EndChild();
     ImGui::SameLine();
     ImGui::BeginChild("right",ImVec2(0,0),true);
