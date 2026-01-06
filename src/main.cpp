@@ -1,11 +1,13 @@
 #include <jni.h>
-#include <android/log.h>
 #include <android/input.h>
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
 #include <pthread.h>
 #include <unistd.h>
-#include <dlfcn.h>
+#include <vector>
+#include <string>
+#include <cmath>
+#include <ctime>
 
 #include "pl/Hook.h"
 #include "pl/Gloss.h"
@@ -14,221 +16,231 @@
 #include "ImGui/backends/imgui_impl_opengl3.h"
 #include "ImGui/backends/imgui_impl_android.h"
 
-#include <fstream>
-#include <sstream>
-#include <string>
+static bool initialized=false;
+static int width=0,height=0;
+static EGLBoolean (*orig_swap)(EGLDisplay,EGLSurface)=0;
+static int32_t (*orig_input)(void*,void*,bool,long,uint32_t*,AInputEvent**)=0;
 
-/* ================= Globals ================= */
+static bool show_intro=true;
+static float intro_time=0;
 
-static bool g_initialized = false;
-static int g_width = 0, g_height = 0;
-static EGLContext g_targetcontext = EGL_NO_CONTEXT;
-static EGLSurface g_targetsurface = EGL_NO_SURFACE;
+static int tab=0;
+static bool show_keyboard=false;
+static std::string password_input="";
+static bool password_ok=false;
 
-static EGLBoolean (*orig_eglswapbuffers)(EGLDisplay, EGLSurface) = nullptr;
+static float hue=0;
 
-/* RGB Accent */
-static float redd = 180.f;
-static float greenn = 0.f;
-static float bluee = 255.f;
+static bool features[30];
+static bool hidden_features[10];
 
-/* Crosshair */
-static bool crosshair_enabled = false;
-static float crosshair_length_x = 35.f;
-static float crosshair_length_y = 35.f;
-static float crosshair_thickness = 3.f;
-static ImVec4 crosshair_color = ImVec4(0,1,0,1);
+static int fps=0;
+static int frames=0;
+static double last_time=0;
 
-/* options.txt */
-static const char* OPTIONS_PATH =
-"/storage/emulated/0/Android/data/org.levimc.launcher/files/games/com.mojang/minecraftpe/options.txt";
+static int get_ping(){ return 42; }
 
-static char options_buffer[16384];
-static bool options_loaded = false;
-static bool options_dirty = false;
-
-/* Input */
-static int32_t (*orig_input2)(void*, void*, bool, long, uint32_t*, AInputEvent**) = nullptr;
-
-/* ================= Theme ================= */
-
-static void apply_theme()
+static ImVec4 rgb()
 {
-    ImGuiStyle& style = ImGui::GetStyle();
-    ImVec4* c = style.Colors;
-
-    ImVec4 accent(
-        redd / 255.f,
-        greenn / 255.f,
-        bluee / 255.f,
-        1.f
-    );
-
-    c[ImGuiCol_Text] = ImVec4(1,1,1,1);
-    c[ImGuiCol_WindowBg] = ImVec4(0,0,0,0.75f);
-    c[ImGuiCol_FrameBg] = ImVec4(0.05f,0.05f,0.05f,0.54f);
-    c[ImGuiCol_FrameBgHovered] = ImVec4(0.19f,0.19f,0.19f,0.54f);
-    c[ImGuiCol_FrameBgActive] = ImVec4(0.2f,0.22f,0.23f,1);
-
-    c[ImGuiCol_Border] = accent;
-    c[ImGuiCol_CheckMark] = accent;
-    c[ImGuiCol_SliderGrab] = accent;
-    c[ImGuiCol_SliderGrabActive] = accent;
-    c[ImGuiCol_Separator] = accent;
-    c[ImGuiCol_SeparatorHovered] = ImVec4(accent.x,accent.y,accent.z,0.35f);
-    c[ImGuiCol_ResizeGrip] = ImVec4(accent.x,accent.y,accent.z,0.5f);
-    c[ImGuiCol_ResizeGripActive] = accent;
-    c[ImGuiCol_ScrollbarGrab] = ImVec4(accent.x,accent.y,accent.z,0.5f);
-    c[ImGuiCol_ScrollbarGrabActive] = accent;
-
-    style.WindowRounding = 7.f;
-    style.FrameRounding = 4.f;
-    style.ScrollbarRounding = 8.f;
-    style.WindowBorderSize = 2.f;
+    hue+=0.15f;
+    if(hue>360)hue=0;
+    float h=hue/60,c=1,x=c*(1-fabs(fmod(h,2)-1));
+    float r=0,g=0,b=0;
+    if(h<1){r=c;g=x;}
+    else if(h<2){r=x;g=c;}
+    else if(h<3){g=c;b=x;}
+    else if(h<4){g=x;b=c;}
+    else if(h<5){r=x;b=c;}
+    else{r=c;b=x;}
+    return ImVec4(r,g,b,1);
 }
 
-/* ================= Input Hook ================= */
-
-static int32_t hook_input2(
-    void* thiz, void* a1, bool a2, long a3,
-    uint32_t* a4, AInputEvent** event)
+static void theme()
 {
-    int32_t r = orig_input2 ? orig_input2(thiz,a1,a2,a3,a4,event) : 0;
-    if (r == 0 && event && *event && g_initialized)
-        ImGui_ImplAndroid_HandleInputEvent(*event);
-    return r;
+    ImGuiStyle&s=ImGui::GetStyle();
+    ImVec4* c=s.Colors;
+    ImVec4 a=rgb();
+    c[ImGuiCol_WindowBg]=ImVec4(0,0,0,0.85f);
+    c[ImGuiCol_Border]=a;
+    c[ImGuiCol_Button]=ImVec4(0.18f,0.18f,0.18f,0.9f);
+    c[ImGuiCol_ButtonHovered]=a;
+    c[ImGuiCol_ButtonActive]=a;
+    s.WindowBorderSize=2;
+    s.WindowRounding=14;
+    s.FrameRounding=10;
 }
 
-/* ================= Options ================= */
-
-static void load_options()
+static void keyboard()
 {
-    std::ifstream f(OPTIONS_PATH);
-    if (!f.is_open()) return;
-    std::stringstream ss;
-    ss << f.rdbuf();
-    strncpy(options_buffer, ss.str().c_str(), sizeof(options_buffer)-1);
-    options_loaded = true;
-}
-
-static void save_options()
-{
-    std::ofstream f(OPTIONS_PATH, std::ios::trunc);
-    if (!f.is_open()) return;
-    f << options_buffer;
-    options_dirty = false;
-}
-
-/* ================= Draw ================= */
-
-static void draw_crosshair()
-{
-    if (!crosshair_enabled) return;
-    auto* d = ImGui::GetBackgroundDrawList();
-    ImVec2 c(g_width*0.5f, g_height*0.5f);
-    ImU32 col = ImGui::ColorConvertFloat4ToU32(crosshair_color);
-
-    d->AddLine({c.x-crosshair_length_x,c.y},{c.x+crosshair_length_x,c.y},col,crosshair_thickness);
-    d->AddLine({c.x,c.y-crosshair_length_y},{c.x,c.y+crosshair_length_y},col,crosshair_thickness);
-}
-
-static void draw_menu()
-{
-    ImVec2 center(g_width*0.5f, g_height*0.5f);
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, {0.5f,0.5f});
-    ImGui::SetNextWindowSize({650,650}, ImGuiCond_FirstUseEver);
-
-    ImGui::Begin("Editor");
-
-    ImGui::Checkbox("Crosshair",&crosshair_enabled);
-    ImGui::SliderFloat("Length X",&crosshair_length_x,5,150);
-    ImGui::SliderFloat("Length Y",&crosshair_length_y,5,150);
-    ImGui::SliderFloat("Thickness",&crosshair_thickness,1,10);
-    ImGui::ColorEdit4("Color",(float*)&crosshair_color);
-
-    ImGui::Separator();
-
-    if (!options_loaded) load_options();
-    ImGui::InputTextMultiline("options.txt",options_buffer,sizeof(options_buffer),{0,300});
-    if (ImGui::Button("Save")) save_options();
-
+    if(!show_keyboard)return;
+    ImGui::SetNextWindowSize(ImVec2(720,420));
+    ImGui::Begin("Virtual Keyboard",0,ImGuiWindowFlags_NoCollapse);
+    const char* k="ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    for(int i=0;i<26;i++)
+    {
+        char b[2]={k[i],0};
+        if(ImGui::Button(b,ImVec2(60,60))) password_input.push_back(k[i]);
+        if((i+1)%7!=0) ImGui::SameLine();
+    }
+    if(ImGui::Button("DEL",ImVec2(200,60)) && !password_input.empty()) password_input.pop_back();
+    ImGui::SameLine();
+    if(ImGui::Button("CLEAR",ImVec2(200,60))) password_input.clear();
+    ImGui::SameLine();
+    if(ImGui::Button("CLOSE",ImVec2(200,60))) show_keyboard=false;
     ImGui::End();
 }
 
-/* ================= Render ================= */
+static void overlays()
+{
+    ImGui::SetNextWindowPos(ImVec2(width-300,20));
+    ImGui::SetNextWindowBgAlpha(0.5f);
+    ImGui::Begin("Overlay",0,ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize);
+    ImGui::Text("Ping: %d ms",get_ping());
+    ImGui::Text("FPS: %d",fps);
+    time_t t=time(0);
+    tm* lt=localtime(&t);
+    ImGui::Text("Time: %02d:%02d:%02d",lt->tm_hour,lt->tm_min,lt->tm_sec);
+    ImGui::End();
+}
+
+static void intro()
+{
+    ImGui::SetNextWindowSize(ImVec2(700,420));
+    ImGui::SetNextWindowPos(ImVec2(width/2,height/2),0,ImVec2(0.5f,0.5f));
+    ImGui::Begin("Intro",0,ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoResize);
+    ImGui::SetWindowFontScale(1.6f);
+    ImGui::Text("Shortcut Plugin");
+    ImGui::Separator();
+    ImGui::TextColored(rgb(),"████████████████████████████");
+    ImGui::Text("Version: V1.0");
+    ImGui::Text("Development: MCPE OVER");
+    ImGui::Text("Launcher: Light, Levi Launcher");
+    ImGui::End();
+    intro_time+=ImGui::GetIO().DeltaTime;
+    if(intro_time>3.5f) show_intro=false;
+}
+
+static void config_tab()
+{
+    ImGui::SetWindowFontScale(1.3f);
+    ImGui::Text("Config Features");
+    ImGui::Separator();
+    for(int i=0;i<30;i++)
+    {
+        std::string name="Feature "+std::to_string(i+1);
+        ImGui::Checkbox(name.c_str(),&features[i]);
+        if(i%2==0) ImGui::SameLine();
+    }
+}
+
+static void sorry_tab()
+{
+    ImGui::SetWindowFontScale(1.3f);
+    if(!password_ok)
+    {
+        ImGui::Text("Password Required");
+        ImGui::InputText("##pw",&password_input);
+        ImGui::SameLine();
+        if(ImGui::Button("Keyboard",ImVec2(160,50))) show_keyboard=true;
+        if(ImGui::Button("Unlock",ImVec2(240,60)))
+            if(password_input=="MCMROVER") password_ok=true;
+    }
+    else
+    {
+        ImGui::Text("Hidden Features");
+        ImGui::Separator();
+        for(int i=0;i<10;i++)
+        {
+            std::string n="Hidden Feature "+std::to_string(i+1);
+            ImGui::Checkbox(n.c_str(),&hidden_features[i]);
+        }
+    }
+}
+
+static void ui()
+{
+    ImGui::SetNextWindowSize(ImVec2(820,660),ImGuiCond_FirstUseEver);
+    ImGui::Begin("Main Panel");
+    ImGui::BeginChild("tabs",ImVec2(160,0),true);
+    if(ImGui::Button("Config",ImVec2(-1,80))) tab=0;
+    if(ImGui::Button("Sorry",ImVec2(-1,80))) tab=1;
+    ImGui::EndChild();
+    ImGui::SameLine();
+    ImGui::BeginChild("content",ImVec2(0,0),true);
+    if(tab==0) config_tab();
+    if(tab==1) sorry_tab();
+    ImGui::EndChild();
+    ImGui::End();
+    keyboard();
+    overlays();
+}
+
+static int32_t hook_input(void*a,void*b,bool c,long d,uint32_t*e,AInputEvent**ev)
+{
+    int32_t r=orig_input?orig_input(a,b,c,d,e,ev):0;
+    if(r==0 && ev && *ev && initialized)
+        ImGui_ImplAndroid_HandleInputEvent(*ev);
+    return r;
+}
 
 static void setup()
 {
-    if (g_initialized) return;
-
+    if(initialized)return;
     ImGui::CreateContext();
+    ImGuiIO&io=ImGui::GetIO();
+    io.FontGlobalScale=1.6f;
     ImGui_ImplAndroid_Init();
     ImGui_ImplOpenGL3_Init("#version 300 es");
-
-    apply_theme();
-    g_initialized = true;
+    last_time=ImGui::GetTime();
+    initialized=true;
 }
 
 static void render()
 {
-    if (!g_initialized) return;
-
-    ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = {(float)g_width,(float)g_height};
-
+    double now=ImGui::GetTime();
+    frames++;
+    if(now-last_time>=1.0)
+    {
+        fps=frames;
+        frames=0;
+        last_time=now;
+    }
+    theme();
+    ImGuiIO&io=ImGui::GetIO();
+    io.DisplaySize=ImVec2(width,height);
     ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplAndroid_NewFrame(g_width,g_height);
+    ImGui_ImplAndroid_NewFrame(width,height);
     ImGui::NewFrame();
-
-    draw_menu();
-    draw_crosshair();
-
+    if(show_intro) intro(); else ui();
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
 
-/* ================= EGL Hook ================= */
-
-static EGLBoolean hook_eglswapbuffers(EGLDisplay dpy, EGLSurface surf)
+static EGLBoolean hook_swap(EGLDisplay d,EGLSurface s)
 {
-    EGLContext ctx = eglGetCurrentContext();
-    if (ctx == EGL_NO_CONTEXT)
-        return orig_eglswapbuffers(dpy,surf);
-
-    eglQuerySurface(dpy,surf,EGL_WIDTH,&g_width);
-    eglQuerySurface(dpy,surf,EGL_HEIGHT,&g_height);
-
+    eglQuerySurface(d,s,EGL_WIDTH,&width);
+    eglQuerySurface(d,s,EGL_HEIGHT,&height);
     setup();
     render();
-
-    return orig_eglswapbuffers(dpy,surf);
+    return orig_swap(d,s);
 }
 
-/* ================= Init ================= */
-
-static void* mainthread(void*)
+static void* thread(void*)
 {
     sleep(3);
     GlossInit(true);
-
-    GHandle egl = GlossOpen("libEGL.so");
-    void* swap = (void*)GlossSymbol(egl,"eglSwapBuffers",nullptr);
-    GlossHook(swap,(void*)hook_eglswapbuffers,(void**)&orig_eglswapbuffers);
-
-    GHandle input = GlossOpen("libinput.so");
-    void* sym = (void*)GlossSymbol(
-        input,
-        "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE",
-        nullptr
-    );
-    GlossHook(sym,(void*)hook_input2,(void**)&orig_input2);
-
-    return nullptr;
+    GHandle egl=GlossOpen("libEGL.so");
+    void* sw=(void*)GlossSymbol(egl,"eglSwapBuffers",0);
+    GlossHook(sw,(void*)hook_swap,(void**)&orig_swap);
+    GHandle inp=GlossOpen("libinput.so");
+    void* sym=(void*)GlossSymbol(inp,"_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE",0);
+    GlossHook(sym,(void*)hook_input,(void**)&orig_input);
+    return 0;
 }
 
 __attribute__((constructor))
 void init()
 {
     pthread_t t;
-    pthread_create(&t,nullptr,mainthread,nullptr);
+    pthread_create(&t,0,thread,0);
 }
