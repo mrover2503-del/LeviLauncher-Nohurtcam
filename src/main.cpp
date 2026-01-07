@@ -4,248 +4,225 @@
 #include <GLES3/gl3.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 #include <ctime>
 #include <cmath>
-#include <cstring>
+#include <vector>
 #include <string>
+#include <algorithm>
 
-#include "pl/Hook.h"
 #include "pl/Gloss.h"
-
 #include "ImGui/imgui.h"
 #include "ImGui/backends/imgui_impl_android.h"
 #include "ImGui/backends/imgui_impl_opengl3.h"
 
-static EGLBoolean (*orig_swap)(EGLDisplay,EGLSurface)=0;
-static int32_t (*orig_input)(void*,void*,bool,long,uint32_t*,AInputEvent**)=0;
+static EGLBoolean (*orig_swap)(EGLDisplay,EGLSurface);
+static int32_t (*orig_input)(void*,void*,bool,long,uint32_t*,AInputEvent**);
 
-static int w=0,h=0;
-static bool inited=false;
-
+static int sw,sh;
+static bool inited;
 static bool show_intro=true;
 
-static int tab=0;
-static float hue=0.0f;
+static float hue;
+static int fps,frames;
+static double last_fps;
 
-static bool cfg[10]={0};
-static bool hidden[10]={0};
+static float touch_x,touch_y;
 
-static bool kb_open=false;
-static char pw[32]={0};
-static bool unlocked=false;
+static bool cfg[10]={1,1,1,1,1,0,0,0,0,0};
+static bool hidden[10];
 
-static int fps=0,frames=0;
-static double last_fps=0.0;
+static bool unlocked;
+static bool kb_open;
+static char pw[32];
 
-static float touch_x=0.0f,touch_y=0.0f;
+static float anim_intro;
 
-static ImVec4 rgb()
-{
-    hue+=0.25f;
-    if(hue>=360.0f) hue=0.0f;
-    float h6=hue/60.0f;
-    float c=1.0f;
-    float x=c*(1.0f-fabsf(fmodf(h6,2.0f)-1.0f));
+struct Item{std::string n;bool e;float a;};
+static std::vector<Item> arr={
+{"Battery",1,0},{"FPS",1,0},{"Ping",1,0},{"Resolution",1,0},{"Time",1,0}
+};
+
+static ImU32 RGB(){
+    hue+=0.6f;if(hue>360)hue=0;
+    float h=hue/60,x=1-fabsf(fmodf(h,2)-1);
     float r=0,g=0,b=0;
-    if(h6<1){r=c;g=x;}
-    else if(h6<2){r=x;g=c;}
-    else if(h6<3){g=c;b=x;}
-    else if(h6<4){g=x;b=c;}
-    else if(h6<5){r=x;b=c;}
-    else{r=c;b=x;}
-    return ImVec4(r,g,b,1.0f);
+    if(h<1){r=1;g=x;}else if(h<2){r=x;g=1;}
+    else if(h<3){g=1;b=x;}else if(h<4){g=x;b=1;}
+    else if(h<5){r=x;b=1;}else{r=1;b=x;}
+    return IM_COL32(r*255,g*255,b*255,255);
 }
 
-static void theme()
-{
-    ImGuiStyle&s=ImGui::GetStyle();
-    ImVec4* c=s.Colors;
-    ImVec4 a=rgb();
-    c[ImGuiCol_WindowBg]=ImVec4(0,0,0,0.85f);
-    c[ImGuiCol_Border]=a;
-    c[ImGuiCol_Button]=ImVec4(0.15f,0.15f,0.15f,1);
-    c[ImGuiCol_ButtonHovered]=a;
-    c[ImGuiCol_ButtonActive]=a;
-    c[ImGuiCol_CheckMark]=a;
-    s.WindowBorderSize=3;
-    s.WindowRounding=16;
-    s.FrameRounding=12;
+static int Battery(){
+    int fd=open("/sys/class/power_supply/battery/capacity",O_RDONLY);
+    if(fd<0)return-1;
+    char b[8]={0};read(fd,b,7);close(fd);
+    return atoi(b);
 }
 
-static void draw_box(const char* title,const char* text,float x,float y)
-{
-    ImVec4 a=rgb();
-    ImGui::SetNextWindowPos(ImVec2(x,y));
-    ImGui::SetNextWindowBgAlpha(0.5f);
-    ImGui::PushStyleColor(ImGuiCol_Border,a);
-    ImGui::Begin(title,0,
-        ImGuiWindowFlags_NoTitleBar|
-        ImGuiWindowFlags_NoResize|
-        ImGuiWindowFlags_NoInputs);
-    ImGui::SetWindowFontScale(1.3f);
-    ImGui::Text("%s",text);
+static int Ping(){
+    sockaddr_in a{};
+    a.sin_family=AF_INET;
+    a.sin_port=htons(53);
+    inet_pton(AF_INET,"8.8.8.8",&a.sin_addr);
+    int s=socket(AF_INET,SOCK_STREAM,0);
+    timeval tv{0,300000};
+    setsockopt(s,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof(tv));
+    timespec t1,t2;
+    clock_gettime(CLOCK_MONOTONIC,&t1);
+    int r=connect(s,(sockaddr*)&a,sizeof(a));
+    clock_gettime(CLOCK_MONOTONIC,&t2);
+    close(s);
+    if(r<0)return-1;
+    return (t2.tv_sec-t1.tv_sec)*1000+(t2.tv_nsec-t1.tv_nsec)/1000000;
+}
+
+static void Keyboard(){
+    if(!kb_open)return;
+    ImGui::SetNextWindowSize({760,460});
+    ImGui::Begin("Keyboard",0,ImGuiWindowFlags_NoCollapse);
+    const char*k="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    for(int i=0;i<36;i++){
+        char b[2]={k[i],0};
+        if(ImGui::Button(b,{70,70})){
+            int l=strlen(pw);
+            if(l<31){pw[l]=k[i];pw[l+1]=0;}
+        }
+        if((i+1)%7)ImGui::SameLine();
+    }
+    if(ImGui::Button("DEL",{220,60})){int l=strlen(pw);if(l)pw[l-1]=0;}
+    ImGui::SameLine();
+    if(ImGui::Button("CLEAR",{220,60}))pw[0]=0;
+    ImGui::SameLine();
+    if(ImGui::Button("CLOSE",{220,60}))kb_open=false;
     ImGui::End();
-    ImGui::PopStyleColor();
 }
 
-static int fake_ping(){ return 45; }
-static int fake_battery(){ return 87; }
+static void OverlayBox(const char*t,float y){
+    ImDrawList*d=ImGui::GetForegroundDrawList();
+    float w=360;
+    ImVec2 p={20,y};
+    d->AddRectFilled(p,{p.x+w,p.y+44},IM_COL32(0,0,0,128),8);
+    d->AddRect(p,{p.x+w,p.y+44},RGB(),8,0,3);
+    d->AddText({p.x+12,p.y+12},IM_COL32_WHITE,t);
+}
 
-static void overlay()
-{
-    time_t now=time(0);
-    struct tm ti;
-    localtime_r(&now,&ti);
-
+static void Overlay(){
+    time_t tt=time(0);
+    tm tmv;localtime_r(&tt,&tmv);
     float y=20;
+    if(cfg[0])OverlayBox(("Ping: "+std::to_string(Ping())+" ms").c_str(),y),y+=52;
+    if(cfg[1])OverlayBox(("FPS: "+std::to_string(fps)).c_str(),y),y+=52;
+    if(cfg[2])OverlayBox(("Time: "+std::to_string(tmv.tm_hour)+":"+std::to_string(tmv.tm_min)).c_str(),y),y+=52;
+    if(cfg[3])OverlayBox(("Battery: "+std::to_string(Battery())+"%").c_str(),y),y+=52;
+    if(cfg[4])OverlayBox(("Res: "+std::to_string(sw)+"x"+std::to_string(sh)).c_str(),y),y+=52;
+}
 
-    if(cfg[0]){ draw_box("p","Ping: 45 ms",20,y); y+=90; }
-    if(cfg[1]){ char b[32]; sprintf(b,"FPS: %d",fps); draw_box("f",b,20,y); y+=90; }
-    if(cfg[2]){ char b[32]; sprintf(b,"Time: %02d:%02d:%02d",ti.tm_hour,ti.tm_min,ti.tm_sec); draw_box("t",b,20,y); y+=90; }
-    if(cfg[3]){ draw_box("b","Battery: 87%",20,y); y+=90; }
-    if(cfg[4]){ char b[32]; sprintf(b,"Res: %dx%d",w,h); draw_box("r",b,20,y); y+=90; }
-    if(cfg[5]){ char b[32]; sprintf(b,"Touch X: %.0f",touch_x); draw_box("x",b,20,y); y+=90; }
-    if(cfg[6]){ char b[32]; sprintf(b,"Touch Y: %.0f",touch_y); draw_box("y",b,20,y); y+=90; }
-    if(cfg[7]){ char b[32]; sprintf(b,"Aspect: %.2f",(float)w/h); draw_box("a",b,20,y); y+=90; }
-    if(cfg[8]){ char b[32]; sprintf(b,"Scale: %.2f",ImGui::GetIO().FontGlobalScale); draw_box("s",b,20,y); y+=90; }
-    if(cfg[9]){ char b[32]; sprintf(b,"Hue: %.1f",hue); draw_box("h",b,20,y); }
-
-    if(unlocked)
-    {
-        for(int i=0;i<10;i++)
-            if(hidden[i])
-                draw_box("hid","Hidden Overlay Active",w-360,60+i*70);
+static void ArrayList(){
+    auto&io=ImGui::GetIO();
+    std::vector<Item*>a;
+    for(auto&i:arr)if(i.e)a.push_back(&i);
+    std::sort(a.begin(),a.end(),[](Item*x,Item*y){return x->n<y->n;});
+    float y=40;
+    for(auto*i:a){
+        i->a+= (1-i->a)*0.15f;
+        float w=ImGui::CalcTextSize(i->n.c_str()).x+50;
+        float x=io.DisplaySize.x-(w*i->a)-10;
+        ImDrawList*d=ImGui::GetForegroundDrawList();
+        d->AddRectFilled({x,y},{x+w,y+34},IM_COL32(0,0,0,200),6);
+        d->AddRectFilled({x+w-4,y},{x+w,y+34},RGB());
+        d->AddText({x+12,y+8},IM_COL32_WHITE,i->n.c_str());
+        y+=38;
     }
 }
 
-static void intro()
-{
-    ImGui::SetNextWindowSize(ImVec2(720,420));
-    ImGui::SetNextWindowPos(ImVec2(w/2,h/2),0,ImVec2(0.5f,0.5f));
-    ImGui::Begin("Hud Plugin",0,ImGuiWindowFlags_NoResize);
+static void Intro(){
+    ImGui::SetNextWindowSize({760,420});
+    ImGui::SetNextWindowPos({sw/2.f,sh/2.f},0,{0.5f,0.5f});
+    ImGui::Begin("Intro",0,ImGuiWindowFlags_NoResize);
     ImGui::SetWindowFontScale(1.6f);
     ImGui::Text("Shortcut Plugin");
     ImGui::Separator();
     ImGui::Text("Version: V1.0");
     ImGui::Text("Development: MCPE OVER");
     ImGui::Text("Launcher: Light, Levi Launcher");
-
-    ImGui::SetCursorPosY(ImGui::GetWindowSize().y-90);
-    ImGui::SetCursorPosX((ImGui::GetWindowSize().x-200)/2);
-    if(ImGui::Button("I read it",ImVec2(200,60)))
-        show_intro=false;
-
+    ImGui::SetCursorPosY(340);
+    if(ImGui::Button("I read it",{720,50}))show_intro=false;
     ImGui::End();
 }
 
-static void config_tab()
-{
-    const char* n[10]={
-        "Ping","FPS","Clock","Battery",
-        "Resolution","Touch X","Touch Y",
-        "Aspect Ratio","DPI Scale","RGB Hue"
-    };
-    for(int i=0;i<10;i++) ImGui::Checkbox(n[i],&cfg[i]);
-}
-
-static void sorry_tab()
-{
-    if(!unlocked)
-    {
+static void Menu(){
+    ImGui::SetNextWindowSize({900,720},ImGuiCond_FirstUseEver);
+    ImGui::Begin("Menu");
+    ImGui::Text("Config");
+    for(int i=0;i<10;i++)ImGui::Checkbox(("Overlay "+std::to_string(i+1)).c_str(),&cfg[i]);
+    ImGui::Separator();
+    ImGui::Text("Secret");
+    if(!unlocked){
         ImGui::InputText("##pw",pw,sizeof(pw));
         ImGui::SameLine();
-        if(ImGui::Button("Keyboard")) kb_open=true;
-        if(ImGui::Button("Unlock"))
-            if(strcmp(pw,"MCMROVER")==0) unlocked=true;
+        if(ImGui::Button("Keyboard"))kb_open=true;
+        if(ImGui::Button("Unlock"))if(!strcmp(pw,"MCMROVER"))unlocked=true;
+    }else{
+        for(int i=0;i<10;i++)ImGui::Checkbox(("Hidden "+std::to_string(i+1)).c_str(),&hidden[i]);
     }
-    else
-        for(int i=0;i<10;i++)
-            ImGui::Checkbox(("Hidden "+std::to_string(i+1)).c_str(),&hidden[i]);
-}
-
-static void ui()
-{
-    ImGui::SetNextWindowSize(ImVec2(900,700),ImGuiCond_FirstUseEver);
-    ImGui::Begin("Main");
-    ImGui::BeginChild("left",ImVec2(180,0),true);
-    if(ImGui::Button("Config",ImVec2(-1,80))) tab=0;
-    if(ImGui::Button("Secret",ImVec2(-1,80))) tab=1;
-    ImGui::EndChild();
-    ImGui::SameLine();
-    ImGui::BeginChild("right",ImVec2(0,0),true);
-    if(tab==0) config_tab();
-    if(tab==1) sorry_tab();
-    ImGui::EndChild();
     ImGui::End();
-    overlay();
 }
 
-static int32_t hook_input_func(void*a,void*b,bool c,long d,uint32_t*e,AInputEvent**ev)
-{
-    int32_t r=orig_input?orig_input(a,b,c,d,e,ev):0;
-    if(ev&&*ev&&AInputEvent_getType(*ev)==AINPUT_EVENT_TYPE_MOTION)
-    {
-        touch_x=AMotionEvent_getX(*ev,0);
-        touch_y=AMotionEvent_getY(*ev,0);
-        if(inited) ImGui_ImplAndroid_HandleInputEvent(*ev);
-    }
-    return r;
-}
-
-static void setup()
-{
-    if(inited) return;
-    ImGui::CreateContext();
-    ImGuiIO&io=ImGui::GetIO();
-    io.FontGlobalScale=1.5f;
-    ImGui_ImplAndroid_Init();
-    ImGui_ImplOpenGL3_Init("#version 300 es");
-    last_fps=ImGui::GetTime();
-    inited=true;
-}
-
-static void render()
-{
+static void Render(){
     double t=ImGui::GetTime();
     frames++;
-    if(t-last_fps>=1.0){ fps=frames; frames=0; last_fps=t; }
-
-    theme();
+    if(t-last_fps>=1){fps=frames;frames=0;last_fps=t;}
     ImGuiIO&io=ImGui::GetIO();
-    io.DisplaySize=ImVec2(w,h);
+    io.DisplaySize={float(sw),float(sh)};
     ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplAndroid_NewFrame(w,h);
+    ImGui_ImplAndroid_NewFrame(sw,sh);
     ImGui::NewFrame();
-    if(show_intro) intro(); else ui();
+    io.FontGlobalScale=1.8f;
+    if(show_intro)Intro();else{Menu();Overlay();ArrayList();}
+    Keyboard();
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
 
-static EGLBoolean hook_swap_func(EGLDisplay d,EGLSurface s)
-{
-    eglQuerySurface(d,s,EGL_WIDTH,&w);
-    eglQuerySurface(d,s,EGL_HEIGHT,&h);
-    setup();
-    render();
+static EGLBoolean hook_swap(EGLDisplay d,EGLSurface s){
+    eglQuerySurface(d,s,EGL_WIDTH,&sw);
+    eglQuerySurface(d,s,EGL_HEIGHT,&sh);
+    if(!inited){
+        ImGui::CreateContext();
+        ImGui_ImplAndroid_Init();
+        ImGui_ImplOpenGL3_Init("#version 300 es");
+        last_fps=ImGui::GetTime();
+        inited=true;
+    }
+    Render();
     return orig_swap(d,s);
 }
 
-static void* thread(void*)
-{
+static int32_t hook_input(void*a,void*b,bool c,long d,uint32_t*e,AInputEvent**ev){
+    int r=orig_input(a,b,c,d,e,ev);
+    if(ev&&*ev&&AInputEvent_getType(*ev)==AINPUT_EVENT_TYPE_MOTION){
+        touch_x=AMotionEvent_getX(*ev,0);
+        touch_y=AMotionEvent_getY(*ev,0);
+        ImGui_ImplAndroid_HandleInputEvent(*ev);
+    }
+    return r;
+}
+
+static void* th(void*){
     sleep(3);
     GlossInit(true);
-    GHandle egl=GlossOpen("libEGL.so");
-    GlossHook((void*)GlossSymbol(egl,"eglSwapBuffers",0),(void*)hook_swap_func,(void**)&orig_swap);
-    GHandle inp=GlossOpen("libinput.so");
-    GlossHook((void*)GlossSymbol(inp,
-        "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE",0),
-        (void*)hook_input_func,(void**)&orig_input);
+    auto egl=GlossOpen("libEGL.so");
+    GlossHook((void*)GlossSymbol(egl,"eglSwapBuffers",0),(void*)hook_swap,(void**)&orig_swap);
+    auto inp=GlossOpen("libinput.so");
+    GlossHook((void*)GlossSymbol(inp,"_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE",0),(void*)hook_input,(void**)&orig_input);
     return 0;
 }
 
 __attribute__((constructor))
-void init()
-{
+void init(){
     pthread_t t;
-    pthread_create(&t,0,thread,0);
+    pthread_create(&t,0,th,0);
 }
