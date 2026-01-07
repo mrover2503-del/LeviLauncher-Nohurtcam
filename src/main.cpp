@@ -254,17 +254,32 @@ static int32_t hook_input(void*a,void*b,bool c,long d,uint32_t*e,AInputEvent**ev
     return r;
 }
 
-static void* th(void*){
+static void* th(void*) {
     sleep(3);
+
     GlossInit(true);
-    auto egl=GlossOpen("libEGL.so");
-    GlossHook(GlossSymbol(egl,"eglSwapBuffers",0),(void*)hook_swap,(void**)&orig_swap);
-    auto inp=GlossOpen("libinput.so");
+
+    void* egl = GlossOpen("libEGL.so");
+    void* swap_sym = (void*)(uintptr_t)GlossSymbol(egl, "eglSwapBuffers", 0);
     GlossHook(
-        GlossSymbol(inp,"_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE",0),
-        (void*)hook_input,(void**)&orig_input
+        swap_sym,
+        (void*)hook_swap,
+        (void**)&orig_swap
     );
-    return 0;
+
+    void* inp = GlossOpen("libinput.so");
+    void* input_sym = (void*)(uintptr_t)GlossSymbol(
+        inp,
+        "_ZN7android13InputConsumer7consumeEPNS_26InputEventFactoryInterfaceEblPjPPNS_10InputEventE",
+        0
+    );
+    GlossHook(
+        input_sym,
+        (void*)hook_input,
+        (void**)&orig_input
+    );
+
+    return nullptr;
 }
 
 __attribute__((constructor))
